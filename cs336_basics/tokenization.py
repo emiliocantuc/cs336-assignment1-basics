@@ -3,8 +3,6 @@ import regex as re
 from collections import Counter
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-# just split on whitespace
-# PAT = r"""\S+"""
 
 
 def train_bpe(
@@ -40,105 +38,109 @@ def train_bpe(
 
     # Pretokenize by scanning the whole file
     pretokenized: dict[tuple[bytes], int] = Counter()
-    special_set = {t.encode() for t in special_tokens}
-    escaped_specials = [re.escape(t).encode() for t in special_tokens]
-    escaped_specials.sort(key=len, reverse=True)
-    token_pattern_bytes = PAT.encode()
-    if escaped_specials:
-        special_branch = b"|".join(escaped_specials)
-        token_pattern_bytes = b"(?:" + special_branch + b")|" + token_pattern_bytes
-    token_pattern = re.compile(token_pattern_bytes)
+    special_pat = "|".join(re.escape(t) for t in sorted(special_tokens, key=len, reverse=True))
 
-    CHUNK = None #8192  # read 8 KB at a time TODO: tune?
-    with open(input_path, "rb") as f:
+    # TODO make this more efficient. Currently just adding last part to carry every time. 
+    # What if last part is huge?
+    CHUNK = 8192
+    carry = ""
+    with open(input_path, "r", encoding="utf-8") as f:
         while True:
-            txt = f.read(CHUNK)
+
+            chunk = f.read(CHUNK)
+            txt = carry + chunk
             if not txt:
                 break
 
-            for m in token_pattern.finditer(txt):
-                token_bytes = m[0]
-                if token_bytes in special_set:
-                    pretokenized[(token_bytes,)] += 1
-                    continue
+            carry = ""
 
-                k = tuple(token_bytes[i : i + 1] for i in range(len(token_bytes)))
-                pretokenized[k] += 1
-    
-    # print('initial pretokenized', pretokenized)
-    for bs in pretokenized:
-        assert r'<' not in bs
+            parts = re.split(special_pat, txt) if special_tokens else [txt]
+
+            for i, part in enumerate(parts):
+                if i == len(parts) - 1 and chunk:
+                    carry = part + carry
+                    break
+                for m in re.finditer(PAT, part):
+                    s = m.group(0)
+                    b = s.encode("utf-8")
+                    pretokenized[tuple(b[j:j+1] for j in range(len(b)))] += 1
 
     # Build pair frequencies
     pair_freq = Counter()
     for bs, freq in pretokenized.items():
-        for i in range(0, len(bs)-1):
-            k = bs[i:i+2]
+        for i in range(0, len(bs) - 1):
+            k = bs[i : i + 2]
             pair_freq[k] += freq
 
-    # print(len(pretokenized), len(pair_freq))
-    # print('='*40)
-
     while len(vocab) < vocab_size:
-
-        most_freq = max(pair_freq, key=lambda x: (pair_freq.get(x, 0), *x)) # clever way to break ties: second criterion as second item in tuple
+        most_freq = max(
+            pair_freq, key=lambda x: (pair_freq[x], *x)
+        )  # clever way to break ties: second criterion as second item in tuple
         del pair_freq[most_freq]
 
         a, b = most_freq
-        # print(a, b)
 
         merges.append(most_freq)
-        vocab.append(a+b)
+        vocab.append(a + b)
 
         # in the pretokenized dict, replace keys (..., a, b, ...) with (..., ab, ...)
         for bs in list(pretokenized.keys()):
-
             pre_freq = pretokenized.get(bs, 0)
 
             i = 0
-            while i < len(bs)-1:
-                if bs[i:i+2] == most_freq:
-
+            while i < len(bs) - 1:
+                if bs[i : i + 2] == most_freq:
                     # replace (..., a, b, ...) with (..., ab, ...)
-                    new_bs = bs[:i] + (a+b,) + bs[i+2:]
-                    pretokenized[new_bs] = pre_freq
+                    new_bs = bs[:i] + (a + b,) + bs[i + 2 :]
+                    pretokenized[new_bs] += pre_freq
                     del pretokenized[bs]
 
                     # update pair_freq
 
                     # add (prev, (a,b)) and ((a,b), next)
                     if i > 0:
-                        pair_freq[bs[i-1], a+b] += pre_freq
+                        pair_freq[bs[i - 1], a + b] += pre_freq
 
-                    if i < len(bs)-2:
-                        pair_freq[a+b, bs[i+2]] += pre_freq
+                    if i < len(bs) - 2:
+                        pair_freq[a + b, bs[i + 2]] += pre_freq
 
                     # remove (prev, a), (b, next)
                     if i > 0:
-                        k = (bs[i-1], a)
+                        k = (bs[i - 1], a)
                         pair_freq[k] -= pre_freq
                         if pair_freq[k] <= 0:
                             del pair_freq[k]
-                    
-                    if i < len(bs)-2:
-                        k = (b, bs[i+2])
+
+                    if i < len(bs) - 2:
+                        k = (b, bs[i + 2])
                         pair_freq[k] -= pre_freq
                         if pair_freq[k] <= 0:
                             del pair_freq[k]
-                    
+
                     bs = new_bs
                 else:
                     i += 1
-    
+
     return {i: b for i, b in enumerate(vocab)}, merges
 
 
 if __name__ == "__main__":
     # input_path = "data/TinyStoriesV2-GPT4-valid.txt"
-    input_path = "data/tokenizer_test.txt"
-    special_tokens = ["<pad>", "<unk>", "<s>", "</s>", "<|endoftext|>"]
-    vocab_size = 256 + len(special_tokens) + 12
+    # input_path = "data/tokenizer_test.txt"
+    # special_tokens = ["<pad>", "<unk>", "<s>", "</s>", "<|endoftext|>"]
+    # vocab_size = 256 + len(special_tokens) + 12
 
-    vocab, merges = train_bpe(input_path, vocab_size, special_tokens)
-    print(f'vocab size: {len(vocab)}')
-    assert merges[-1] == (b'lowe', b'r')
+    # vocab, merges = train_bpe(input_path, vocab_size, special_tokens)
+    # print(f"vocab size: {len(vocab)}")
+    # assert merges[-1] == (b"lowe", b"r")
+
+    input_path = "tests/fixtures/tinystories_sample_5M.txt"
+    vocab, merges = train_bpe(
+        input_path=input_path,
+        vocab_size=1000,
+        special_tokens=["<|endoftext|>"],
+    )
+
+    assert merges[-1] == (b' mag', b'ic')
+    print(merges[-1])
+    # 628
