@@ -2,8 +2,27 @@ import os
 import regex as re
 from collections import Counter
 from typing import BinaryIO
+from multiprocessing import Pool, cpu_count
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+
+def pretokenize_chunk(input_path: str | os.PathLike, start: int, end: int, special_pat: str) -> dict[tuple[bytes], int]:
+
+    pretokenized: dict[tuple[bytes], int] = Counter()
+
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+
+    parts = re.split(special_pat, chunk) if special_pat else [chunk]
+    for part in parts:
+        for m in re.finditer(PAT, part):
+            s = m.group(0)
+            b = s.encode("utf-8")
+            pretokenized[tuple(b[j:j+1] for j in range(len(b)))] += 1
+
+    return pretokenized
 
 def pretokenize(input_path: str | os.PathLike, special_tokens: list[str], chunk_size: int, end_of_doc_token: str) -> dict[tuple[bytes], int]:
 
@@ -19,17 +38,13 @@ def pretokenize(input_path: str | os.PathLike, special_tokens: list[str], chunk_
 
         boundaries = find_chunk_boundaries(f, N_CHUNKS, end_of_doc_token.encode())
 
-        # TODO parallelize this by sending each start/end pair to a set of processes.
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-
-            parts = re.split(special_pat, chunk) if special_tokens else [chunk]
-            for part in parts:
-                for m in re.finditer(PAT, part):
-                    s = m.group(0)
-                    b = s.encode("utf-8")
-                    pretokenized[tuple(b[j:j+1] for j in range(len(b)))] += 1
+        with Pool(min(cpu_count(), N_CHUNKS)) as p:
+            results = [
+                p.apply_async(pretokenize_chunk, (input_path, start, end, special_pat))
+                for start, end in zip(boundaries[:-1], boundaries[1:])
+            ]
+            for r in results:
+                pretokenized.update(r.get())
 
     return pretokenized
 
@@ -89,7 +104,7 @@ def train_bpe(
         )  # clever way to break ties: second criterion as second item in tuple
 
     while len(vocab) < vocab_size:
-        
+
         most_freq = get_most_freq()
         del pair_freq[most_freq]
 
@@ -189,28 +204,33 @@ def find_chunk_boundaries(
 
 
 if __name__ == "__main__":
-    # input_path = "data/TinyStoriesV2-GPT4-valid.txt"
-    # input_path = "data/tokenizer_test.txt"
-    # special_tokens = ["<pad>", "<unk>", "<s>", "</s>", "<|endoftext|>"]
-    # vocab_size = 256 + len(special_tokens) + 12
-
-    # vocab, merges = train_bpe(input_path, vocab_size, special_tokens)
-    # print(f"vocab size: {len(vocab)}")
-    # assert merges[-1] == (b"lowe", b"r")
 
     import cProfile
+    import json
+    from functools import partial
 
     input_path = "tests/fixtures/tinystories_sample_5M.txt"
+    vocab_size = 1_000
 
-    # input_path = "data/TinyStoriesV2-GPT4-valid.txt"
-    # vocab, merges = train_bpe(
-    #     input_path=input_path,
-    #     vocab_size=10_000,
-    #     special_tokens=["<|endoftext|>"],
-    # )
+    input_path = "data/TinyStoriesV2-GPT4-valid.txt"
+    # input_path = "data/TinyStoriesV2-GPT4-train.txt"
+    vocab_size = 10_000
 
-    cProfile.run(
-        "train_bpe(input_path=input_path, vocab_size=10_000, special_tokens=['<|endoftext|>'])"
-    )
+    d = partial(bytes.decode, encoding="utf-8", errors="ignore")
 
-    # import 
+    os.makedirs("results", exist_ok=True)
+
+    def run():
+        vocab, merges = train_bpe(
+            input_path=input_path,
+            vocab_size=vocab_size,
+            special_tokens=["<|endoftext|>"],
+            chunk_size=8192 * 4,  # 32kB chunks
+        )
+        with open("results/bpe_vocab.json", "w") as f:
+            json.dump({i: d(v) for i, v in vocab.items()}, f, indent=2)
+
+        with open("results/bpe_merges.json", "w") as f:
+            json.dump([(d(a), d(b)) for a,b in merges], f, indent=2)
+
+    cProfile.run("run()")
