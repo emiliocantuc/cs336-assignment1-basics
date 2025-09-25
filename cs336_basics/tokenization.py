@@ -206,8 +206,7 @@ def find_chunk_boundaries(
 if __name__ == "__main__":
 
     import cProfile
-    import json
-    from functools import partial
+    import pickle
 
     input_path = "tests/fixtures/tinystories_sample_5M.txt"
     vocab_size = 1_000
@@ -215,8 +214,6 @@ if __name__ == "__main__":
     input_path = "data/TinyStoriesV2-GPT4-valid.txt"
     # input_path = "data/TinyStoriesV2-GPT4-train.txt"
     vocab_size = 10_000
-
-    d = partial(bytes.decode, encoding="utf-8", errors="ignore")
 
     os.makedirs("results", exist_ok=True)
 
@@ -227,10 +224,11 @@ if __name__ == "__main__":
             special_tokens=["<|endoftext|>"],
             chunk_size=8192 * 4,  # 32kB chunks
         )
-        with open("results/bpe_vocab.json", "w") as f:
-            json.dump({i: d(v) for i, v in vocab.items()}, f, indent=2)
+        with open("results/bpe_vocab.pkl", "wb") as f:
+            pickle.dump(vocab, f)
 
-        with open("results/bpe_merges.json", "w") as f:
-            json.dump([(d(a), d(b)) for a,b in merges], f, indent=2)
+        with open("results/bpe_merges.pkl", "wb") as f:
+            pickle.dump(merges, f)
 
-    cProfile.run("run()")
+    run()
+    # cProfile.run("run()")
