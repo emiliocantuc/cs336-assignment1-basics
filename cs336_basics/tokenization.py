@@ -2,7 +2,7 @@ import os
 import regex as re
 from collections import Counter
 import heapq
-from typing import BinaryIO
+from typing import BinaryIO, Iterable
 from multiprocessing import Pool, cpu_count
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -52,11 +52,16 @@ def pretokenize(
 
 # TODO have to use this?
 class Desc:
-    __slots__ = ('x',)
-    def __init__(self, x): self.x = x
+    __slots__ = ("x",)
+
+    def __init__(self, x):
+        self.x = x
+
     def __lt__(self, other):
         return self.x > other.x
-    def __repr__(self): return f"Desc({self.x!r})"
+
+    def __repr__(self):
+        return f"Desc({self.x!r})"
 
 
 class MostFrequentPairHeap:
@@ -140,7 +145,6 @@ def train_bpe(
     most_freq_heap = MostFrequentPairHeap(pair_freq)
 
     while len(vocab) < vocab_size:
-
         most_freq = most_freq_heap.pop()
 
         if most_freq is None:
@@ -187,6 +191,127 @@ def train_bpe(
                     i += 1
 
     return {i: b for i, b in enumerate(vocab)}, merges
+
+
+
+def bytes_to_unicode():
+    # from OpenAI GPT-2 tokenization
+    bs = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
+
+_BT2U = bytes_to_unicode()
+_U2BT = {u: b for b, u in _BT2U.items()}
+
+def gpt2_str_token_to_bytes(s: str) -> bytes:
+    # map each unicode char in GPT-2 token string back to its original byte
+    return bytes([_U2BT[ch] for ch in s])
+
+
+class BPETokenizer:
+    def __init__(
+        self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str] | None = None
+    ):
+        self.vocab = vocab
+        self.inv_vocab = {v: k for k, v in vocab.items()}
+        self.merges = merges
+        self.special_tokens = special_tokens if special_tokens else []
+
+        self.merge_rank = {pair: i for i, pair in enumerate(merges)}
+
+        self.special_tokens = set(self.special_tokens)
+        special_pat = "|".join(re.escape(t) for t in sorted(self.special_tokens, key=len, reverse=True))
+        self.special_re = re.compile("(" + special_pat + ")") if special_pat else None
+
+        assert isinstance(self.vocab, dict)
+        assert all(isinstance(k, int) and isinstance(v, bytes) for k, v in self.vocab.items())
+        assert isinstance(self.merges, list)
+        assert all(isinstance(a, bytes) and isinstance(b, bytes) for a, b in self.merges)
+
+    @classmethod
+    def from_files(
+        cls, vocab_filepath: str | os.PathLike, merges_filepath: str, special_tokens: list[str] | None = None
+    ):
+        import json
+
+        with open(vocab_filepath) as f:
+            raw = json.load(f)
+        vocab = {id_: gpt2_str_token_to_bytes(tok_str) for tok_str, id_ in raw.items()}
+
+        merges = []
+        with open(merges_filepath) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                a, b = line.split()
+                merges.append((gpt2_str_token_to_bytes(a), gpt2_str_token_to_bytes(b)))
+
+        return cls(vocab, merges, special_tokens)
+
+    def encode(self, text: str) -> list[int]:
+        """Encode a string into a list of token ids."""
+
+        out = []
+
+        for part in self.special_re.splititer(text) if self.special_re else [text]:
+            if not part:
+                continue
+            elif self.special_re and part in self.special_tokens:
+                out.append(self.inv_vocab[part.encode('utf-8')])
+            else:
+                for m in re.finditer(PAT, part):
+
+                    pretoken = m.group(0)
+                    b = pretoken.encode('utf-8')
+                    bs = tuple(b[i:i+1] for i in range(len(b)))
+
+                    while True:
+
+                        pairs = list((bs[i], bs[i + 1]) for i in range(len(bs) - 1))
+                        if not pairs:
+                            break
+
+                        # TODO replace with a lazy min heap
+                        rank, merge = min([(self.merge_rank.get(p, float('inf')), p) for p in pairs])
+                        if rank == float('inf'):
+                            break
+
+                        new_bs = []
+                        i = 0
+                        while i < len(bs):
+    
+                            if i < len(bs)-1 and bs[i:i+2] == merge:
+                                new_bs.append(bs[i]+bs[i+1])
+                                i += 2
+                            else:
+                                new_bs.append(bs[i])
+                                i += 1
+
+                        bs = tuple(new_bs)
+
+                    out.extend([self.inv_vocab[b] for b in bs])
+
+        return out
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterable[int]:
+        for text in iterable:
+            yield from self.encode(text)
+
+    def decode(self, ids: list[int]) -> str:
+        """Decode a sequence of token IDs into text"""
+
+        out = bytearray()
+        for i in ids:
+            out.extend(self.vocab.get(i, b'\xef\xbf\xbd'))  # U+FFFD in UTF-8
+        return out.decode("utf-8", errors="replace")
 
 
 # Taken verbatim from pretokenization_example.py
@@ -244,24 +369,30 @@ if __name__ == "__main__":
     input_path = "tests/fixtures/tinystories_sample_5M.txt"
     vocab_size = 1_000
 
-    input_path = "data/TinyStoriesV2-GPT4-valid.txt"
-    # input_path = "data/TinyStoriesV2-GPT4-train.txt"
-    vocab_size = 10_000
+    # input_path = "data/TinyStoriesV2-GPT4-valid.txt"
+    # # input_path = "data/TinyStoriesV2-GPT4-train.txt"
+    # vocab_size = 10_000
 
-    os.makedirs("results", exist_ok=True)
+    # os.makedirs("results", exist_ok=True)
 
-    def run():
-        vocab, merges = train_bpe(
-            input_path=input_path,
-            vocab_size=vocab_size,
-            special_tokens=["<|endoftext|>"],
-            chunk_size=8192 * 8,  # 32kB chunks
-        )
-        with open("results/bpe_vocab.pkl", "wb") as f:
-            pickle.dump(vocab, f)
+    # def run():
+    #     vocab, merges = train_bpe(
+    #         input_path=input_path,
+    #         vocab_size=vocab_size,
+    #         special_tokens=["<|endoftext|>"],
+    #         chunk_size=65536,  # 8192 * 8,  # 32kB chunks
+    #     )
+    #     with open("results/bpe_vocab.pkl", "wb") as f:
+    #         pickle.dump(vocab, f)
 
-        with open("results/bpe_merges.pkl", "wb") as f:
-            pickle.dump(merges, f)
+    #     with open("results/bpe_merges.pkl", "wb") as f:
+    #         pickle.dump(merges, f)
 
     # run()
-    cProfile.run("run()")
+    # cProfile.run("run()")
+
+    tok = BPETokenizer.from_files("tests/fixtures/gpt2_vocab.json", "tests/fixtures/gpt2_merges.txt")
+    print(tok.encode("Hello, how are you?"))
+    print(tok.encode("Hóla"))
+    print(tok.decode(tok.encode("Hóla")))
+    import pdb; pdb.set_trace()
