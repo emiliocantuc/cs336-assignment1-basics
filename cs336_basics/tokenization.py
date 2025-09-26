@@ -152,8 +152,8 @@ def train_bpe(
         vocab.append(a + b)
 
         # in the pretokenized dict, replace keys (..., a, b, ...) with (..., ab, ...)
-        for bs in list(pretokenized.keys()):
-            pre_freq = pretokenized.get(bs, 0)
+        for bs, pre_freq in list(pretokenized.items()):
+            # pre_freq = pretokenized.get(bs, 0) # Removing this saved a lot of time
 
             i = 0
             while i < len(bs) - 1:
@@ -245,7 +245,7 @@ if __name__ == "__main__":
     vocab_size = 1_000
 
     input_path = "data/TinyStoriesV2-GPT4-valid.txt"
-    input_path = "data/TinyStoriesV2-GPT4-train.txt"
+    # input_path = "data/TinyStoriesV2-GPT4-train.txt"
     vocab_size = 10_000
 
     os.makedirs("results", exist_ok=True)
