@@ -28,13 +28,13 @@ def pretokenize_chunk(input_path: str | os.PathLike, start: int, end: int, speci
 def pretokenize(
     input_path: str | os.PathLike, special_tokens: list[str], chunk_size: int, end_of_doc_token: str
 ) -> dict[tuple[bytes], int]:
-    # Pretokenize by scanning the whole file
+
     pretokenized: dict[tuple[bytes], int] = Counter()
     special_pat = "|".join(re.escape(t) for t in sorted(special_tokens, key=len, reverse=True))
 
     file_size = os.path.getsize(input_path)
     N_CHUNKS = (file_size + chunk_size - 1) // chunk_size
-    print(f"File size: {file_size} bytes, chunk size: {chunk_size} bytes, N_CHUNKS: {N_CHUNKS}")
+    # print(f"File size: {file_size} bytes, chunk size: {chunk_size} bytes, N_CHUNKS: {N_CHUNKS}")
 
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, N_CHUNKS, end_of_doc_token.encode())
