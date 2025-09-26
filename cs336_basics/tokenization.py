@@ -1,6 +1,7 @@
 import os
 import regex as re
 from collections import Counter
+import heapq
 from typing import BinaryIO
 from multiprocessing import Pool, cpu_count
 
@@ -8,7 +9,6 @@ PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s
 
 
 def pretokenize_chunk(input_path: str | os.PathLike, start: int, end: int, special_pat: str) -> dict[tuple[bytes], int]:
-
     pretokenized: dict[tuple[bytes], int] = Counter()
 
     with open(input_path, "rb") as f:
@@ -20,22 +20,23 @@ def pretokenize_chunk(input_path: str | os.PathLike, start: int, end: int, speci
         for m in re.finditer(PAT, part):
             s = m.group(0)
             b = s.encode("utf-8")
-            pretokenized[tuple(b[j:j+1] for j in range(len(b)))] += 1
+            pretokenized[tuple(b[j : j + 1] for j in range(len(b)))] += 1
 
     return pretokenized
 
-def pretokenize(input_path: str | os.PathLike, special_tokens: list[str], chunk_size: int, end_of_doc_token: str) -> dict[tuple[bytes], int]:
 
+def pretokenize(
+    input_path: str | os.PathLike, special_tokens: list[str], chunk_size: int, end_of_doc_token: str
+) -> dict[tuple[bytes], int]:
     # Pretokenize by scanning the whole file
     pretokenized: dict[tuple[bytes], int] = Counter()
     special_pat = "|".join(re.escape(t) for t in sorted(special_tokens, key=len, reverse=True))
 
-
     file_size = os.path.getsize(input_path)
     N_CHUNKS = (file_size + chunk_size - 1) // chunk_size
+    print(f"File size: {file_size} bytes, chunk size: {chunk_size} bytes, N_CHUNKS: {N_CHUNKS}")
 
     with open(input_path, "rb") as f:
-
         boundaries = find_chunk_boundaries(f, N_CHUNKS, end_of_doc_token.encode())
 
         with Pool(min(cpu_count(), N_CHUNKS)) as p:
@@ -47,6 +48,44 @@ def pretokenize(input_path: str | os.PathLike, special_tokens: list[str], chunk_
                 pretokenized.update(r.get())
 
     return pretokenized
+
+
+# TODO have to use this?
+class Desc:
+    __slots__ = ('x',)
+    def __init__(self, x): self.x = x
+    def __lt__(self, other):
+        return self.x > other.x
+    def __repr__(self): return f"Desc({self.x!r})"
+
+
+class MostFrequentPairHeap:
+    def __init__(self, pair_freq: Counter):
+        self.pair_freq = pair_freq
+        self.freq_heap = [Desc((freq, a, b)) for (a, b), freq in pair_freq.items()]
+        heapq.heapify(self.freq_heap)
+
+    def pop(self):
+        while self.freq_heap:
+            freq, a, b = heapq.heappop(self.freq_heap).x
+            # freq = -neg_freq
+            if freq == self.pair_freq.get((a, b)) and freq > 0:
+                self.pair_freq.pop((a, b), None)
+                return a, b
+        return None
+
+    def update(self, pair, freq_delta):
+        if freq_delta == 0:
+            return
+
+        freq = self.pair_freq.get(pair, 0) + freq_delta
+        if freq > 0:
+            self.pair_freq[pair] = freq
+            a, b = pair
+            heapq.heappush(self.freq_heap, Desc((freq, a, b)))
+        else:
+            self.pair_freq.pop(pair, None)
+
 
 def train_bpe(
     input_path: str | os.PathLike,
@@ -89,25 +128,24 @@ def train_bpe(
     pretokenized = pretokenize(input_path, special_tokens, chunk_size, end_of_doc_token)
 
     pair_freq = Counter()
-    
-    def get_pair_freq(): # Function for profiling
+
+    def get_pair_freq():  # Function for profiling
         # Build pair frequencies
         for bs, freq in pretokenized.items():
             for i in range(0, len(bs) - 1):
                 k = bs[i : i + 2]
                 pair_freq[k] += freq
-    get_pair_freq()
 
-    def get_most_freq():
-        return max(
-            pair_freq, key=lambda x: (pair_freq[x], *x)
-        )  # clever way to break ties: second criterion as second item in tuple
+    get_pair_freq()
+    most_freq_heap = MostFrequentPairHeap(pair_freq)
 
     while len(vocab) < vocab_size:
 
-        most_freq = get_most_freq()
-        del pair_freq[most_freq]
+        most_freq = most_freq_heap.pop()
 
+        if most_freq is None:
+            print("No more pairs to merge.")
+            break
         a, b = most_freq
 
         merges.append(most_freq)
@@ -129,25 +167,22 @@ def train_bpe(
 
                     # add (prev, (a,b)) and ((a,b), next)
                     if i > 0:
-                        pair_freq[bs[i - 1], a + b] += pre_freq
+                        most_freq_heap.update((bs[i - 1], a + b), pre_freq)
 
                     if i < len(bs) - 2:
-                        pair_freq[a + b, bs[i + 2]] += pre_freq
+                        most_freq_heap.update((a + b, bs[i + 2]), pre_freq)
 
                     # remove (prev, a), (b, next)
                     if i > 0:
                         k = (bs[i - 1], a)
-                        pair_freq[k] -= pre_freq
-                        if pair_freq[k] <= 0:
-                            del pair_freq[k]
+                        most_freq_heap.update(k, -pre_freq)
 
                     if i < len(bs) - 2:
                         k = (b, bs[i + 2])
-                        pair_freq[k] -= pre_freq
-                        if pair_freq[k] <= 0:
-                            del pair_freq[k]
+                        most_freq_heap.update(k, -pre_freq)
 
                     bs = new_bs
+
                 else:
                     i += 1
 
@@ -202,9 +237,7 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-
 if __name__ == "__main__":
-
     import cProfile
     import pickle
 
@@ -212,7 +245,7 @@ if __name__ == "__main__":
     vocab_size = 1_000
 
     input_path = "data/TinyStoriesV2-GPT4-valid.txt"
-    # input_path = "data/TinyStoriesV2-GPT4-train.txt"
+    input_path = "data/TinyStoriesV2-GPT4-train.txt"
     vocab_size = 10_000
 
     os.makedirs("results", exist_ok=True)
@@ -222,7 +255,7 @@ if __name__ == "__main__":
             input_path=input_path,
             vocab_size=vocab_size,
             special_tokens=["<|endoftext|>"],
-            chunk_size=8192 * 4,  # 32kB chunks
+            chunk_size=8192 * 8,  # 32kB chunks
         )
         with open("results/bpe_vocab.pkl", "wb") as f:
             pickle.dump(vocab, f)
@@ -230,5 +263,5 @@ if __name__ == "__main__":
         with open("results/bpe_merges.pkl", "wb") as f:
             pickle.dump(merges, f)
 
-    run()
-    # cProfile.run("run()")
+    # run()
+    cProfile.run("run()")
