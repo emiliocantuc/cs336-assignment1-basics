@@ -54,3 +54,9 @@ Deliverable: An example, with a one-sentence explanation.
 **Ans:** `bytes([0, 128]).decode('utf-8')` because bytes 128-256 are reserved for multi-byte characters, so they must be leading. By themselves they are invalid.
 
 
+## P3: train_bpe_tiny_stories
+(a) Train a byte-level BPE tokenizer on the TinyStories dataset, using a maximum vocabulary size
+of 10,000. Make sure to add the TinyStories `<|endoftext|>` special token to the vocabulary.
+Serialize the resulting vocabulary and merges to disk for further inspection. How many hours
+and memory did training take? What is the longest token in the vocabulary? Does it make sense?
+TODO
