@@ -3,7 +3,6 @@ import torch.nn as nn
 from torch import Tensor
 from einops import rearrange, reduce, einsum
 from jaxtyping import Float, Int, Bool
-from math import sqrt
 
 
 class Linear(nn.Module):
@@ -97,10 +96,61 @@ def scaled_dot_product_attention(
     mask: Bool[Tensor, "... q k"] | None = None,
 ) -> Float[Tensor, "... q d_v"]:
     d_k = K.shape[-1]
-    x = einsum(K, Q, "... k d_k, ... q d_k -> ... q k") / sqrt(d_k)
+    x = einsum(K, Q, "... k d_k, ... q d_k -> ... q k") / (d_k**0.5)
 
     if mask is not None:
-        x.masked_fill_(~mask, -torch.inf)
+        x = x.masked_fill(~mask, -torch.inf)
 
     x = softmax(x, dim=-1)
     return einsum(x, V, "... q k, ... k d_v -> ... q d_v")
+
+
+class MultiheadSelfAttention(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        max_seq_len: int = None,
+        rope: bool = False,  # TODO
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        self.num_heads = num_heads
+
+        self.W_q = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+        self.W_k = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+        self.W_v = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+        self.W_o = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+
+        sigma = 2 / (d_model + d_model)
+        for w in [self.W_q, self.W_k, self.W_v, self.W_o]:
+            nn.init.trunc_normal_(w.data, std=sigma, a=sigma * -3, b=sigma * 3)
+
+        if max_seq_len is not None:
+            self.register_buffer(
+                "mask",
+                torch.tril(torch.ones((max_seq_len, max_seq_len), dtype=torch.bool, device=device)),
+                persistent=False,
+            )
+
+    def forward(self, x: Float[Tensor, "... seq_len d_model"]) -> Float[Tensor, "... seq_len d_model"]:
+        seq_len = x.shape[-2]
+        Q = einsum(x, self.W_q, "... d_in, d_out d_in -> ... d_out")
+        K = einsum(x, self.W_k, "... d_in, d_out d_in -> ... d_out")
+        V = einsum(x, self.W_v, "... d_in, d_out d_in -> ... d_out")
+
+        Q = rearrange(Q, "... s (h d) -> ... h s d", h=self.num_heads)
+        K = rearrange(K, "... s (h d) -> ... h s d", h=self.num_heads)
+        V = rearrange(V, "... s (h d) -> ... h s d", h=self.num_heads)
+
+        if hasattr(self, "mask"):
+            mask = self.mask[:seq_len, :seq_len]
+        else:
+            mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=x.device))
+
+        out = scaled_dot_product_attention(Q, K, V, mask)
+        out = rearrange(out, "... h s d -> ... s (h d)")
+        out = einsum(out, self.W_o, "... d_in, d_out d_in -> ... d_out")
+        return out
