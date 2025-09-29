@@ -78,7 +78,7 @@ class RotaryPositionalEmbedding(nn.Module):
         inv_freqs = torch.pow(theta, torch.arange(0, d_k // 2) * (-2 / d_k))
         pos = torch.arange(max_seq_len, dtype=torch.float32)
 
-        angles = einsum(pos, inv_freqs, "p, f -> p f")
+        angles = einsum(pos, inv_freqs, "... p, f -> ... p f")
         cos, sin = angles.cos(), angles.sin()
 
         self.register_buffer("cos", cos, persistent=False)
@@ -91,7 +91,7 @@ class RotaryPositionalEmbedding(nn.Module):
         sin = self.sin[token_positions]
 
         x1, x2 = x[..., ::2], x[..., 1::2]
-        x_rot = rearrange([x1 * cos - x2 * sin, x1 * sin + x2 * cos], "p b s d -> b s (d p)")
+        x_rot = rearrange([x1 * cos - x2 * sin, x1 * sin + x2 * cos], "p ... s d -> ... s (d p)")
         return x_rot
 
 
@@ -123,7 +123,8 @@ class MultiheadSelfAttention(nn.Module):
         d_model: int,
         num_heads: int,
         max_seq_len: int = None,
-        rope: bool = False,  # TODO
+        use_rope: bool = False,
+        theta: float = 10_000.0,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
@@ -147,7 +148,12 @@ class MultiheadSelfAttention(nn.Module):
                 persistent=False,
             )
 
-    def forward(self, x: Float[Tensor, "... seq_len d_model"]) -> Float[Tensor, "... seq_len d_model"]:
+        if use_rope:
+            self.rope = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len, device)
+
+    def forward(
+        self, x: Float[Tensor, "... seq_len d_model"], token_positions: Int[Tensor, "... seq_len"] | None = None
+    ) -> Float[Tensor, "... seq_len d_model"]:
         seq_len = x.shape[-2]
         Q = einsum(x, self.W_q, "... d_in, d_out d_in -> ... d_out")
         K = einsum(x, self.W_k, "... d_in, d_out d_in -> ... d_out")
@@ -156,6 +162,13 @@ class MultiheadSelfAttention(nn.Module):
         Q = rearrange(Q, "... s (h d) -> ... h s d", h=self.num_heads)
         K = rearrange(K, "... s (h d) -> ... h s d", h=self.num_heads)
         V = rearrange(V, "... s (h d) -> ... h s d", h=self.num_heads)
+
+        if hasattr(self, "rope"):
+            if token_positions is None:
+                token_positions = torch.arange(seq_len, device=x.device)[None, :]
+
+            Q = self.rope(Q, token_positions)
+            K = self.rope(K, token_positions)
 
         if hasattr(self, "mask"):
             mask = self.mask[:seq_len, :seq_len]
