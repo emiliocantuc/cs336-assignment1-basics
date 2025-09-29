@@ -71,20 +71,32 @@ class SwiGLU(nn.Module):
         return self.W2(SiLU(self.W1(x)) * self.W3(x))
 
 
-# TODO
 class RotaryPositionalEmbedding(nn.Module):
     def __init__(self, theta: float, d_k: int, max_seq_len: int, device: torch.device | None = None):
         super().__init__()
 
+        inv_freqs = torch.pow(theta, torch.arange(0, d_k // 2) * (-2 / d_k))
+        pos = torch.arange(max_seq_len, dtype=torch.float32)
+
+        angles = einsum(pos, inv_freqs, "p, f -> p f")
+        cos, sin = angles.cos(), angles.sin()
+
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
+
     def forward(
-        self, x: Float[Tensor, "... seq_len d_k"], token_positions: Float[Float, "... seq_len"]
+        self, x: Float[Tensor, "... seq_len d_k"], token_positions: Int[Tensor, "... seq_len"]
     ) -> Float[Tensor, "... seq_len d_k"]:
-        pass
+        cos = self.cos[token_positions]
+        sin = self.sin[token_positions]
+
+        x1, x2 = x[..., ::2], x[..., 1::2]
+        x_rot = rearrange([x1 * cos - x2 * sin, x1 * sin + x2 * cos], "p b s d -> b s (d p)")
+        return x_rot
 
 
 def softmax(x: Float[Tensor, "..."], dim: int) -> Float[Tensor, "..."]:
-    max_in_dim = x.amax(dim, keepdim=True)
-    x = x - max_in_dim
+    x = x - x.amax(dim, keepdim=True)
     exps = torch.exp(x)
     return exps / exps.sum(dim, keepdim=True)
 
