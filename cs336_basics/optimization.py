@@ -87,3 +87,23 @@ def cos_annealing_lr_schedule(t: float, min_lr: float, max_lr: float, warmup_ite
         return min_lr + (max_lr - min_lr) * 0.5 * (
             1 + math.cos(math.pi * (t - warmup_iters) / (cosine_cycle_iters - warmup_iters))
         )
+
+
+class CosAnnealingLRScheduler:
+    def __init__(
+        self, optimizer: torch.optim.Optimizer, min_lr: float, max_lr: float, warmup_iters: int, cosine_cycle_iters: int
+    ):
+        self.optimizer = optimizer
+        self.min_lr = min_lr
+        self.max_lr = max_lr
+        self.warmup_iters = warmup_iters
+        self.cosine_cycle_iters = cosine_cycle_iters
+        self.t = 0
+        self.last_lr = min_lr
+
+    def step(self):
+        lr = cos_annealing_lr_schedule(self.t, self.min_lr, self.max_lr, self.warmup_iters, self.cosine_cycle_iters)
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr
+        self.t += 1
+        self.last_lr = lr

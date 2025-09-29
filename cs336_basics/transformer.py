@@ -195,13 +195,11 @@ class PreNormTransformerBlock(nn.Module):
         self, x: Float[Tensor, "batch sequence_length d_model"]
     ) -> Float[Tensor, "batch sequence_length d_model"]:
         b, s, d_model = x.shape
-        token_positions = torch.arange(s, device=x.device)[None, :]
-        token_positions = repeat(token_positions, "1 s -> b s", b=b)
 
         res = x
 
-        x = self.att_prenorm(x)
-        x = self.att(x, token_positions=token_positions)
+        x = self.att_prenorm(x)  # TODO check token positions
+        x = self.att(x)
         x = x + res
 
         res = x

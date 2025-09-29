@@ -4,11 +4,14 @@ import os
 from typing import BinaryIO, IO
 
 
-def get_batch(x: np.array, batch_size: int, context_length: int, device: str):
+def get_batch(x: np.array, batch_size: int, context_length: int, device: str, sample: bool = True):
     # clever: use broadcasting to create the input and target sequences
     # and avoid appending to lists and then stacking
 
-    starts = np.random.choice(np.arange(len(x) - context_length), size=batch_size, replace=False)
+    if sample:
+        starts = np.random.choice(np.arange(len(x) - context_length), size=batch_size, replace=False)
+    else:
+        starts = np.arange(0, len(x) - context_length, context_length)[:batch_size]  # TODO test
     offsets = np.arange(context_length)
 
     ixs = starts[:, None] + offsets  # (batch_size, context_length)
