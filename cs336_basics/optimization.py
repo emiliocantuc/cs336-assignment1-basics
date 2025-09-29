@@ -60,3 +60,30 @@ class AdamW(torch.optim.Optimizer):
                 # update
                 p.data -= _lr * state["m"] / (state["v"].sqrt() + eps)
                 p.data *= 1 - lr * weight_decay
+
+
+@torch.no_grad()
+def gradient_clipping(params: list[Parameter], max_l2_norm: float, eps: float = 1e-6):
+    # compute the global norm
+    norm = 0
+    for p in params:
+        if p.grad is not None:
+            norm += p.grad.pow(2).sum()
+
+    norm = norm.sqrt()
+
+    if norm > max_l2_norm:
+        for p in params:
+            if p.grad is not None:
+                p.grad.mul_(max_l2_norm / (norm + eps))
+
+
+def cos_annealing_lr_schedule(t: float, min_lr: float, max_lr: float, warmup_iters: int, cosine_cycle_iters: int):
+    if t < warmup_iters:
+        return (t / warmup_iters) * max_lr
+    elif t > cosine_cycle_iters:
+        return min_lr
+    else:
+        return min_lr + (max_lr - min_lr) * 0.5 * (
+            1 + math.cos(math.pi * (t - warmup_iters) / (cosine_cycle_iters - warmup_iters))
+        )
