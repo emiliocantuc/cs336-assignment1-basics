@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch import Tensor
-from einops import rearrange, reduce, einsum
+from einops import rearrange, reduce, einsum, repeat
 from jaxtyping import Float, Int, Bool
 
 
@@ -17,7 +17,7 @@ class Linear(nn.Module):
         nn.init.trunc_normal_(self.weight.data, std=sigma, a=sigma * -3, b=sigma * 3)
 
     def forward(self, x: Float[Tensor, "... d_in"]) -> Float[Tensor, "... d_out"]:
-        return einsum(x, self.weight, "... in, out in -> ... out")
+        return einsum(x, self.weight, "... i, o i -> ... o")
 
 
 class Embedding(nn.Module):
@@ -179,3 +179,72 @@ class MultiheadSelfAttention(nn.Module):
         out = rearrange(out, "... h s d -> ... s (h d)")
         out = einsum(out, self.W_o, "... d_in, d_out d_in -> ... d_out")
         return out
+
+
+class PreNormTransformerBlock(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int, theta: float):
+        super().__init__()
+
+        self.att_prenorm = RMSNorm(d_model)
+        self.att = MultiheadSelfAttention(d_model, num_heads, max_seq_len=max_seq_len, use_rope=True, theta=theta)
+
+        self.ff_prenorm = RMSNorm(d_model)
+        self.ff = SwiGLU(d_model, d_ff)
+
+    def forward(
+        self, x: Float[Tensor, "batch sequence_length d_model"]
+    ) -> Float[Tensor, "batch sequence_length d_model"]:
+        b, s, d_model = x.shape
+        token_positions = torch.arange(s, device=x.device)[None, :]
+        token_positions = repeat(token_positions, "1 s -> b s", b=b)
+
+        res = x
+
+        x = self.att_prenorm(x)
+        x = self.att(x, token_positions=token_positions)
+        x = x + res
+
+        res = x
+
+        x = self.ff_prenorm(x)
+        x = self.ff(x)
+        x = x + res
+
+        return x
+
+
+class TransformerLM(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        context_length: int,
+        num_layers: int,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        theta: float,
+    ):
+        super().__init__()
+
+        self.emb = Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
+
+        self.transf_blocks = nn.ModuleList(
+            [
+                PreNormTransformerBlock(
+                    d_model=d_model, num_heads=num_heads, d_ff=d_ff, max_seq_len=context_length, theta=theta
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+        self.out_norm = RMSNorm(d_model)
+        self.out_head = Linear(d_model, vocab_size)
+
+    def forward(self, in_indices: Int[Tensor, "batch_size sequence_length"]):
+        x = self.emb(in_indices)
+        for block in self.transf_blocks:
+            x = block(x)
+
+        x = self.out_norm(x)
+        x = self.out_head(x)
+        return x

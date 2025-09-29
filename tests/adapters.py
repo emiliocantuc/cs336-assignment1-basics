@@ -318,7 +318,22 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    from cs336_basics.transformer import PreNormTransformerBlock
+
+    block = PreNormTransformerBlock(d_model, num_heads, d_ff, max_seq_len, theta)
+
+    block.att.W_q.data = weights["attn.q_proj.weight"]
+    block.att.W_k.data = weights["attn.k_proj.weight"]
+    block.att.W_v.data = weights["attn.v_proj.weight"]
+    block.att.W_o.data = weights["attn.output_proj.weight"]
+    block.att_prenorm.gain.data = weights["ln1.weight"]
+
+    block.ff.W1.weight.data = weights["ffn.w1.weight"]
+    block.ff.W2.weight.data = weights["ffn.w2.weight"]
+    block.ff.W3.weight.data = weights["ffn.w3.weight"]
+    block.ff_prenorm.gain.data = weights["ln2.weight"]
+
+    return block(in_features)
 
 
 def run_transformer_lm(
@@ -400,7 +415,45 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    from cs336_basics.transformer import TransformerLM
+
+    model = TransformerLM(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        num_layers=num_layers,
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        theta=rope_theta,
+    )
+
+    model.emb.weight.data = weights["token_embeddings.weight"]
+    model.out_norm.gain.data = weights["ln_final.weight"]
+    model.out_head.weight.data = weights["lm_head.weight"]
+
+    for i in range(num_layers):
+        layer_weights = {
+            "attn.q_proj.weight": weights[f"layers.{i}.attn.q_proj.weight"],
+            "attn.k_proj.weight": weights[f"layers.{i}.attn.k_proj.weight"],
+            "attn.v_proj.weight": weights[f"layers.{i}.attn.v_proj.weight"],
+            "attn.output_proj.weight": weights[f"layers.{i}.attn.output_proj.weight"],
+            "ln1.weight": weights[f"layers.{i}.ln1.weight"],
+            "ffn.w1.weight": weights[f"layers.{i}.ffn.w1.weight"],
+            "ffn.w2.weight": weights[f"layers.{i}.ffn.w2.weight"],
+            "ffn.w3.weight": weights[f"layers.{i}.ffn.w3.weight"],
+            "ln2.weight": weights[f"layers.{i}.ln2.weight"],
+        }
+        model.transf_blocks[i].att.W_q.data = layer_weights["attn.q_proj.weight"]
+        model.transf_blocks[i].att.W_k.data = layer_weights["attn.k_proj.weight"]
+        model.transf_blocks[i].att.W_v.data = layer_weights["attn.v_proj.weight"]
+        model.transf_blocks[i].att.W_o.data = layer_weights["attn.output_proj.weight"]
+        model.transf_blocks[i].att_prenorm.gain.data = layer_weights["ln1.weight"]
+        model.transf_blocks[i].ff.W1.weight.data = layer_weights["ffn.w1.weight"]
+        model.transf_blocks[i].ff.W2.weight.data = layer_weights["ffn.w2.weight"]
+        model.transf_blocks[i].ff.W3.weight.data = layer_weights["ffn.w3.weight"]
+        model.transf_blocks[i].ff_prenorm.gain.data = layer_weights["ln2.weight"]
+
+    return model(in_indices)
 
 
 def run_rmsnorm(
