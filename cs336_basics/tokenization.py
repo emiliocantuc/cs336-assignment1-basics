@@ -2,7 +2,8 @@ import os
 import regex as re
 from collections import Counter
 import heapq
-from typing import BinaryIO, Iterable
+from typing import BinaryIO
+from collections.abc import Iterable
 from multiprocessing import Pool, cpu_count
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -28,7 +29,6 @@ def pretokenize_chunk(input_path: str | os.PathLike, start: int, end: int, speci
 def pretokenize(
     input_path: str | os.PathLike, special_tokens: list[str], chunk_size: int, end_of_doc_token: str
 ) -> dict[tuple[bytes], int]:
-
     pretokenized: dict[tuple[bytes], int] = Counter()
     special_pat = "|".join(re.escape(t) for t in sorted(special_tokens, key=len, reverse=True))
 
@@ -193,7 +193,6 @@ def train_bpe(
     return {i: b for i, b in enumerate(vocab)}, merges
 
 
-
 def bytes_to_unicode():
     # from OpenAI GPT-2 tokenization
     bs = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
@@ -207,8 +206,10 @@ def bytes_to_unicode():
     cs = [chr(n) for n in cs]
     return dict(zip(bs, cs))
 
+
 _BT2U = bytes_to_unicode()
 _U2BT = {u: b for b, u in _BT2U.items()}
+
 
 def gpt2_str_token_to_bytes(s: str) -> bytes:
     # map each unicode char in GPT-2 token string back to its original byte
@@ -265,31 +266,28 @@ class BPETokenizer:
             if not part:
                 continue
             elif self.special_re and part in self.special_tokens:
-                out.append(self.inv_vocab[part.encode('utf-8')])
+                out.append(self.inv_vocab[part.encode("utf-8")])
             else:
                 for m in re.finditer(PAT, part):
-
                     pretoken = m.group(0)
-                    b = pretoken.encode('utf-8')
-                    bs = tuple(b[i:i+1] for i in range(len(b)))
+                    b = pretoken.encode("utf-8")
+                    bs = tuple(b[i : i + 1] for i in range(len(b)))
 
                     while True:
-
                         pairs = list((bs[i], bs[i + 1]) for i in range(len(bs) - 1))
                         if not pairs:
                             break
 
                         # TODO replace with a lazy min heap
-                        rank, merge = min([(self.merge_rank.get(p, float('inf')), p) for p in pairs])
-                        if rank == float('inf'):
+                        rank, merge = min([(self.merge_rank.get(p, float("inf")), p) for p in pairs])
+                        if rank == float("inf"):
                             break
 
                         new_bs = []
                         i = 0
                         while i < len(bs):
-    
-                            if i < len(bs)-1 and bs[i:i+2] == merge:
-                                new_bs.append(bs[i]+bs[i+1])
+                            if i < len(bs) - 1 and bs[i : i + 2] == merge:
+                                new_bs.append(bs[i] + bs[i + 1])
                                 i += 2
                             else:
                                 new_bs.append(bs[i])
@@ -305,12 +303,24 @@ class BPETokenizer:
         for text in iterable:
             yield from self.encode(text)
 
+    def encode_iterable_file(
+        self, input_path: str | os.PathLike, end_of_doc_token: str = "<|endoftext|>"
+    ) -> Iterable[int]:
+        # need to find boundaries
+        with open(input_path, "rb") as f:
+            boundaries = find_chunk_boundaries(f, desired_num_chunks=100, split_special_token=end_of_doc_token.encode())
+
+            for start, end in zip(boundaries[:-1], boundaries[1:]):
+                f.seek(start)
+                chunk = f.read(end - start)
+                yield from self.encode(chunk.decode("utf-8", errors="ignore"))
+
     def decode(self, ids: list[int]) -> str:
         """Decode a sequence of token IDs into text"""
 
         out = bytearray()
         for i in ids:
-            out.extend(self.vocab.get(i, b'\xef\xbf\xbd'))  # U+FFFD in UTF-8
+            out.extend(self.vocab.get(i, b"\xef\xbf\xbd"))  # U+FFFD in UTF-8
         return out.decode("utf-8", errors="replace")
 
 
@@ -363,36 +373,48 @@ def find_chunk_boundaries(
 
 
 if __name__ == "__main__":
-    import cProfile
     import pickle
+    import numpy as np
+    import argparse
 
-    input_path = "tests/fixtures/tinystories_sample_5M.txt"
-    vocab_size = 1_000
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", type=str, default="train", choices=["train", "encode"])
+    parser.add_argument("--input_path", type=str, default="tests/fixtures/tinystories_sample_5M.txt")
+    parser.add_argument("--tokenizer_path", type=str, default="results/tokenizer.pkl")
+    parser.add_argument("--output_path", type=str, default="results/encoded.npy")
+    parser.add_argument("--vocab_size", type=int, default=1_000)
+    args = parser.parse_args()
 
-    # input_path = "data/TinyStoriesV2-GPT4-valid.txt"
-    # # input_path = "data/TinyStoriesV2-GPT4-train.txt"
-    # vocab_size = 10_000
+    if args.mode == "train":
+        special_tokens = ["<|endoftext|>"]
 
-    # os.makedirs("results", exist_ok=True)
+        vocab, merges = train_bpe(
+            input_path=args.input_path,
+            vocab_size=args.vocab_size,
+            special_tokens=special_tokens,
+            chunk_size=65536,  # 8192 * 8,  # 32kB chunks
+        )
 
-    # def run():
-    #     vocab, merges = train_bpe(
-    #         input_path=input_path,
-    #         vocab_size=vocab_size,
-    #         special_tokens=["<|endoftext|>"],
-    #         chunk_size=65536,  # 8192 * 8,  # 32kB chunks
-    #     )
-    #     with open("results/bpe_vocab.pkl", "wb") as f:
-    #         pickle.dump(vocab, f)
+        tokenizer = BPETokenizer(vocab, merges, special_tokens)
+        with open(args.tokenizer_path, "wb") as f:
+            pickle.dump(tokenizer, f)
 
-    #     with open("results/bpe_merges.pkl", "wb") as f:
-    #         pickle.dump(merges, f)
+        print(f"Trained BPE tokenizer with vocab size {len(vocab)} and {len(merges)} merges.")
+        print(f"Saved tokenizer to {args.tokenizer_path}")
 
-    # run()
-    # cProfile.run("run()")
+    elif args.mode == "encode":
+        with open(args.tokenizer_path, "rb") as f:
+            tokenizer: BPETokenizer = pickle.load(f)
 
-    tok = BPETokenizer.from_files("tests/fixtures/gpt2_vocab.json", "tests/fixtures/gpt2_merges.txt")
-    print(tok.encode("Hello, how are you?"))
-    print(tok.encode("Hóla"))
-    print(tok.decode(tok.encode("Hóla")))
-    import pdb; pdb.set_trace()
+        print(f"Loaded tokenizer with vocab size {len(tokenizer.vocab)} and {len(tokenizer.merges)} merges.")
+
+        # TODO flush more often and improve this?
+        # encoded = list(tokenizer.encode_iterable_file(args.input_path))
+        encoded = list(tokenizer.encode_iterable(open(args.input_path).readlines()))
+        np.save(args.output_path, np.array(encoded, dtype=np.uint16))
+        print(f"Saved {len(encoded)} tokens to {args.output_path}")
+
+    # tiny stories: train tokenizer, encode train, encode val
+    # uv run cs336_basics/tokenization.py --mode train --input_path data/TinyStoriesV2-GPT4-train.txt --tokenizer_path results/tiny_tokenizer.pkl --vocab_size 10000
+    # uv run cs336_basics/tokenization.py --mode encode --input_path data/TinyStoriesV2-GPT4-train.txt --tokenizer_path results/tiny_tokenizer.pkl --output_path data/tiny-train.npy
+    # uv run cs336_basics/tokenization.py --mode encode --input_path data/TinyStoriesV2-GPT4-val.txt --tokenizer_path results/tiny_tokenizer.pkl --output_path data/tiny-val.npy

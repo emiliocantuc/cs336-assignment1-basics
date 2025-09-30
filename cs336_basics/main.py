@@ -11,6 +11,18 @@ import numpy as np
 from einops import rearrange
 
 
+def decode(model, input_ids, max_new_tokens):
+    model.eval()
+    generated = input_ids
+    for _ in range(max_new_tokens):
+        logits = model(generated)
+        next_token_logits = logits[:, -1, :]
+        next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+        generated = torch.cat((generated, next_token), dim=1)
+    model.train()
+    return generated
+
+
 @torch.no_grad()
 def evaluate(model, batch_getter, num_batches):
     model.eval()
@@ -25,9 +37,18 @@ def evaluate(model, batch_getter, num_batches):
 
 
 def train(
-    model, optimizer, lr_scheduler, batch_getter, max_iters, log_interval, eval_interval, save_interval, checkpoint_path
+    model,
+    optimizer,
+    lr_scheduler,
+    batch_getter,
+    max_iters,
+    log_interval,
+    eval_interval,
+    save_interval,
+    checkpoint_path,
+    start_iter=0,
 ):
-    for iter in range(max_iters):
+    for iter in range(start_iter, max_iters):
         input_ids, target_ids = batch_getter()
 
         logits = model(input_ids)
@@ -76,7 +97,7 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_iters", type=int, default=1_000)
     parser.add_argument("--max_iters", type=int, default=10_000)
     # other
-    parser.add_argument("--checkpoint_path", type=str, default="checkpoint.pth")
+    parser.add_argument("--checkpoint_path", type=str, default="results/checkpoint.pth")
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--eval_interval", type=int, default=1000)
     parser.add_argument("--save_interval", type=int, default=1000)
@@ -116,13 +137,17 @@ if __name__ == "__main__":
         start_iter = load_checkpoint(args.checkpoint_path, model, optimizer)
         lr_scheduler.t = start_iter
     else:
+        start_iter = 0
         lr_scheduler.step()  # set initial lr
 
-    # TODO
-    # train_ds = np.memmap(args.train_path, mode="r", dtype=np.uint16)
-    # val_ds = np.memmap(args.val_path, mode="r", dtype=np.uint16)
-    train_ds = np.random.randint(0, args.vocab_size, size=100_000, dtype=np.uint16)[:-1]
-    val_ds = train_ds[1:]
+    train_ds = np.load(args.train_path, mmap_mode="r")
+    val_ds = np.load(args.val_path, mmap_mode="r")
+
+    assert train_ds.dtype == np.uint16, f"Expected uint16, got {train_ds.dtype}"
+    assert val_ds.dtype == np.uint16, f"Expected uint16, got {val_ds.dtype}"
+    assert train_ds.max() < args.vocab_size, (
+        f"Training data contains token {train_ds.max()} >= vocab size {args.vocab_size}"
+    )
 
     get_train_batch = partial(
         get_batch,
@@ -133,11 +158,7 @@ if __name__ == "__main__":
     )
 
     get_val_batch = partial(
-        get_batch,
-        x=val_ds,
-        batch_size=args.batch_size,
-        context_length=args.context_length,
-        device=device,
+        get_batch, x=val_ds, batch_size=args.batch_size, context_length=args.context_length, device=device, sample=False
     )
 
     # if args.wandb:
@@ -156,4 +177,5 @@ if __name__ == "__main__":
         eval_interval=args.eval_interval,
         save_interval=args.save_interval,
         checkpoint_path=args.checkpoint_path,
+        start_iter=start_iter,
     )
