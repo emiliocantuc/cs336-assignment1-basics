@@ -16,7 +16,7 @@ def pretokenize_chunk(input_path: str | os.PathLike, start: int, end: int, speci
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="ignore")
 
-    parts = re.split(special_pat, chunk) if special_pat else [chunk]
+    parts = re.splititer(special_pat, chunk) if special_pat else [chunk]
     for part in parts:
         for m in re.finditer(PAT, part):
             s = m.group(0)
@@ -73,7 +73,6 @@ class MostFrequentPairHeap:
     def pop(self):
         while self.freq_heap:
             freq, a, b = heapq.heappop(self.freq_heap).x
-            # freq = -neg_freq
             if freq == self.pair_freq.get((a, b)) and freq > 0:
                 self.pair_freq.pop((a, b), None)
                 return a, b
@@ -131,6 +130,7 @@ def train_bpe(
     merges = []
 
     pretokenized = pretokenize(input_path, special_tokens, chunk_size, end_of_doc_token)
+    print(f"Pretokenized into {len(pretokenized)} unique byte sequences.")
 
     pair_freq = Counter()
 
@@ -392,7 +392,7 @@ if __name__ == "__main__":
             input_path=args.input_path,
             vocab_size=args.vocab_size,
             special_tokens=special_tokens,
-            chunk_size=65536,  # 8192 * 8,  # 32kB chunks
+            chunk_size=8192,  # =65536,  # 8192 * 8,  # 32kB chunks
         )
 
         tokenizer = BPETokenizer(vocab, merges, special_tokens)
@@ -418,3 +418,6 @@ if __name__ == "__main__":
     # uv run cs336_basics/tokenization.py --mode train --input_path data/TinyStoriesV2-GPT4-train.txt --tokenizer_path results/tiny_tokenizer.pkl --vocab_size 10000
     # uv run cs336_basics/tokenization.py --mode encode --input_path data/TinyStoriesV2-GPT4-train.txt --tokenizer_path results/tiny_tokenizer.pkl --output_path data/tiny-train.npy
     # uv run cs336_basics/tokenization.py --mode encode --input_path data/TinyStoriesV2-GPT4-val.txt --tokenizer_path results/tiny_tokenizer.pkl --output_path data/tiny-val.npy
+
+    # open web text
+    #  uv run cs336_basics/tokenization.py --mode train --input_path data/owt_train.txt --tokenizer_path results/owt_tokenizer.pkl --vocab_size 32000
