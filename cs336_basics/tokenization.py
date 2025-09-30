@@ -5,6 +5,9 @@ import heapq
 from typing import BinaryIO
 from collections.abc import Iterable
 from multiprocessing import Pool, cpu_count
+import tempfile
+import pickle
+from tqdm import tqdm
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
@@ -23,7 +26,10 @@ def pretokenize_chunk(input_path: str | os.PathLike, start: int, end: int, speci
             b = s.encode("utf-8")
             pretokenized[tuple(b[j : j + 1] for j in range(len(b)))] += 1
 
-    return pretokenized
+    # Store result to disk to save memory
+    with tempfile.NamedTemporaryFile(delete=False, mode="wb", suffix=".pkl") as temp_f:
+        pickle.dump(pretokenized, temp_f, protocol=pickle.HIGHEST_PROTOCOL)
+        return temp_f.name
 
 
 def pretokenize(
@@ -38,14 +44,20 @@ def pretokenize(
 
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, N_CHUNKS, end_of_doc_token.encode())
-
         with Pool(min(cpu_count(), N_CHUNKS)) as p:
             results = [
                 p.apply_async(pretokenize_chunk, (input_path, start, end, special_pat))
                 for start, end in zip(boundaries[:-1], boundaries[1:])
             ]
-            for r in results:
-                pretokenized.update(r.get())
+            result_file_paths = [r.get() for r in results]
+
+    # Reduce by combining all Counters. Avoids keeping all in memory at once.
+    # Note: could be done in parallel too, but probably not worth the complexity
+    for file_path in result_file_paths:
+        with open(file_path, "rb") as f:
+            chunk_counter = pickle.load(f)
+            pretokenized.update(chunk_counter)
+        os.remove(file_path)
 
     return pretokenized
 
@@ -97,6 +109,7 @@ def train_bpe(
     special_tokens: list[str],
     end_of_doc_token: str = "<|endoftext|>",
     chunk_size: int = 8192,
+    display_progress: bool = False,
     **kwargs,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Given the path to an input corpus, run train a BPE tokenizer and
@@ -130,7 +143,9 @@ def train_bpe(
     merges = []
 
     pretokenized = pretokenize(input_path, special_tokens, chunk_size, end_of_doc_token)
-    print(f"Pretokenized into {len(pretokenized)} unique byte sequences.")
+
+    if display_progress:
+        print(f"Pretokenized into {len(pretokenized)} unique byte sequences.")
 
     pair_freq = Counter()
 
@@ -144,7 +159,8 @@ def train_bpe(
     get_pair_freq()
     most_freq_heap = MostFrequentPairHeap(pair_freq)
 
-    while len(vocab) < vocab_size:
+    for _ in tqdm(range(vocab_size - len(vocab)), disable=not display_progress):
+        # while len(vocab) < vocab_size:
         most_freq = most_freq_heap.pop()
 
         if most_freq is None:
@@ -383,6 +399,7 @@ if __name__ == "__main__":
     parser.add_argument("--tokenizer_path", type=str, default="results/tokenizer.pkl")
     parser.add_argument("--output_path", type=str, default="results/encoded.npy")
     parser.add_argument("--vocab_size", type=int, default=1_000)
+    parser.add_argument("--display_progress", action="store_true", default=False)
     args = parser.parse_args()
 
     if args.mode == "train":
@@ -392,7 +409,8 @@ if __name__ == "__main__":
             input_path=args.input_path,
             vocab_size=args.vocab_size,
             special_tokens=special_tokens,
-            chunk_size=8192,  # =65536,  # 8192 * 8,  # 32kB chunks
+            chunk_size=1048576,  # 65536,  # 8192 * 8,  # 32kB chunks
+            display_progress=args.display_progress,
         )
 
         tokenizer = BPETokenizer(vocab, merges, special_tokens)
