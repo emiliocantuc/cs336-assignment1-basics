@@ -388,20 +388,7 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-if __name__ == "__main__":
-    import pickle
-    import numpy as np
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str, default="train", choices=["train", "encode"])
-    parser.add_argument("--input_path", type=str, default="tests/fixtures/tinystories_sample_5M.txt")
-    parser.add_argument("--tokenizer_path", type=str, default="results/tokenizer.pkl")
-    parser.add_argument("--output_path", type=str, default="results/encoded.npy")
-    parser.add_argument("--vocab_size", type=int, default=1_000)
-    parser.add_argument("--display_progress", action="store_true", default=False)
-    args = parser.parse_args()
-
+def main(args):
     if args.mode == "train":
         special_tokens = ["<|endoftext|>"]
 
@@ -431,6 +418,29 @@ if __name__ == "__main__":
         encoded = list(tokenizer.encode_iterable(open(args.input_path).readlines()))
         np.save(args.output_path, np.array(encoded, dtype=np.uint16))
         print(f"Saved {len(encoded)} tokens to {args.output_path}")
+
+
+if __name__ == "__main__":
+    import pickle
+    import numpy as np
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", type=str, default="train", choices=["train", "encode"])
+    parser.add_argument("--input_path", type=str, default="tests/fixtures/tinystories_sample_5M.txt")
+    parser.add_argument("--tokenizer_path", type=str, default="results/tokenizer.pkl")
+    parser.add_argument("--output_path", type=str, default="results/encoded.npy")
+    parser.add_argument("--vocab_size", type=int, default=1_000)
+    parser.add_argument("--display_progress", action="store_true", default=False)
+    parser.add_argument("--profile", action="store_true", default=False)
+    args = parser.parse_args()
+
+    if args.profile:
+        import cProfile
+
+        cProfile.run("main(args)")
+    else:
+        main(args)
 
     # tiny stories: train tokenizer, encode train, encode val
     # uv run cs336_basics/tokenization.py --mode train --input_path data/TinyStoriesV2-GPT4-train.txt --tokenizer_path results/tiny_tokenizer.pkl --vocab_size 10000
