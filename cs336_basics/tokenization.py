@@ -161,7 +161,6 @@ def train_bpe(
     most_freq_heap = MostFrequentPairHeap(pair_freq)
 
     for _ in tqdm(range(vocab_size - len(vocab)), disable=not display_progress):
-        # while len(vocab) < vocab_size:
         most_freq = most_freq_heap.pop()
 
         if most_freq is None:
@@ -171,6 +170,8 @@ def train_bpe(
 
         merges.append(most_freq)
         vocab.append(a + b)
+
+        local_updates = Counter()  # batch updates to avoid updating heap too often
 
         # in the pretokenized dict, replace keys (..., a, b, ...) with (..., ab, ...)
         for bs, pre_freq in list(pretokenized.items()):
@@ -188,24 +189,27 @@ def train_bpe(
 
                     # add (prev, (a,b)) and ((a,b), next)
                     if i > 0:
-                        most_freq_heap.update((bs[i - 1], a + b), pre_freq)
+                        local_updates[(bs[i - 1], a + b)] += pre_freq
 
                     if i < len(bs) - 2:
-                        most_freq_heap.update((a + b, bs[i + 2]), pre_freq)
+                        local_updates[(a + b, bs[i + 2])] += pre_freq
 
                     # remove (prev, a), (b, next)
                     if i > 0:
                         k = (bs[i - 1], a)
-                        most_freq_heap.update(k, -pre_freq)
+                        local_updates[k] -= pre_freq
 
                     if i < len(bs) - 2:
                         k = (b, bs[i + 2])
-                        most_freq_heap.update(k, -pre_freq)
+                        local_updates[k] -= pre_freq
 
                     bs = new_bs
 
                 else:
                     i += 1
+
+        for pair, freq_delta in local_updates.items():
+            most_freq_heap.update(pair, freq_delta)
 
     return {i: b for i, b in enumerate(vocab)}, merges
 
