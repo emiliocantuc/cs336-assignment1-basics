@@ -10,6 +10,7 @@ import pickle
 from tqdm import tqdm
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+PAT_re = re.compile(PAT)
 
 
 def pretokenize_chunk(input_path: str | os.PathLike, start: int, end: int, special_pat: str) -> dict[tuple[bytes], int]:
@@ -21,7 +22,7 @@ def pretokenize_chunk(input_path: str | os.PathLike, start: int, end: int, speci
 
     parts = re.splititer(special_pat, chunk) if special_pat else [chunk]
     for part in parts:
-        for m in re.finditer(PAT, part):
+        for m in PAT_re.finditer(part):
             s = m.group(0)
             b = s.encode("utf-8")
             pretokenized[tuple(b[j : j + 1] for j in range(len(b)))] += 1
@@ -284,7 +285,7 @@ class BPETokenizer:
             elif self.special_re and part in self.special_tokens:
                 out.append(self.inv_vocab[part.encode("utf-8")])
             else:
-                for m in re.finditer(PAT, part):
+                for m in PAT_re.finditer(part):
                     pretoken = m.group(0)
                     b = pretoken.encode("utf-8")
                     bs = tuple(b[i : i + 1] for i in range(len(b)))
@@ -432,13 +433,13 @@ if __name__ == "__main__":
     parser.add_argument("--output_path", type=str, default="results/encoded.npy")
     parser.add_argument("--vocab_size", type=int, default=1_000)
     parser.add_argument("--display_progress", action="store_true", default=False)
-    parser.add_argument("--profile", action="store_true", default=False)
+    parser.add_argument("--profile_out", type=str, default=None)
     args = parser.parse_args()
 
-    if args.profile:
+    if args.profile_out:
         import cProfile
 
-        cProfile.run("main(args)")
+        cProfile.run("main(args)", args.profile_out)
     else:
         main(args)
 
